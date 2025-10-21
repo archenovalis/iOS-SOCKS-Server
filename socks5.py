@@ -3,6 +3,7 @@
 # Pretty statistics view and IPv6 support added by @philrosenthal
 
 import ipaddress
+import argparse
 import logging
 import socket
 import threading
@@ -77,152 +78,272 @@ except ImportError:
     print("Warning: dnspython not available; falling back to system DNS")
     resolver = None
 
-try:
-    # We want the WiFi address so that clients know what IP to use.
-    # We want the non-WiFi (cellular?) address so that we can force network
-    #  traffic to go over that network. This allows the proxy to correctly
-    #  forward traffic to the cell network even when the WiFi network is
-    #  internet-enabled but limited (e.g. firewalled)
+parser = argparse.ArgumentParser()
+parser.add_argument("--mode", choices=["ios", "android"], default="ios")
+parser.add_argument(
+    "--advertise",
+    choices=["mdns", "ip"],
+    default="mdns",
+    help="Android only: advertise proxy via mDNS hostname or raw IP",
+)
+parser.add_argument(
+    "--host-ip",
+    help="Android only: override hotspot IP when advertise=ip or psutil is unavailable",
+)
+parser.add_argument(
+    "--mdns-name",
+    default="proxy",
+    help="Android only: mDNS base name (results in <name>.local)",
+)
+args = parser.parse_args()
 
-    from collections import defaultdict
+# shared output banner accumulator
+initial_output = ""
 
-    from lib import ifaddrs
+mdns = None
 
-    initial_output = ""
-    ipv4_output = ""
-    ipv6_output = ""
+# Android-only flags guard when running in iOS mode
+if args.mode == "ios":
+    if args.host_ip or args.advertise != "mdns" or args.mdns_name != "proxy":
+        initial_output += "Android-only flags provided; ignoring in iOS mode\n"
 
-    interfaces = ifaddrs.get_interfaces()
-    iftypes = defaultdict(list)
+if args.mode == "ios":
+    try:
+        # We want the WiFi address so that clients know what IP to use.
+        # We want the non-WiFi (cellular?) address so that we can force network
+        #  traffic to go over that network. This allows the proxy to correctly
+        #  forward traffic to the cell network even when the WiFi network is
+        #  internet-enabled but limited (e.g. firewalled)
 
-    for iface in interfaces:
-        if not iface.addr:
-            continue
-        if iface.name.startswith("lo"):
-            continue
-        # XXX implement better classification of interfaces
-        if iface.name.startswith("en"):
-            iftypes["en"].append(iface)
-        elif iface.name.startswith("bridge"):
-            iftypes["bridge"].append(iface)
-        elif iface.name.startswith("utun"):
-            iftypes["vpn"].append(iface)
-        else:
-            iftypes["cell"].append(iface)
+        from collections import defaultdict
 
-    if iftypes["vpn"] and USE_PHONE_VPN:
-        ipv4_output += "VPN use enabled (change with USE_PHONE_VPN)\n"
-        new_ifaces = []
-        new_ifaces.extend(iftypes["vpn"])
-        new_ifaces.extend(iftypes["cell"])
-        iftypes["cell"] = new_ifaces
+        from lib import ifaddrs
 
-    if iftypes["bridge"]:
-        iface = next(
-            (
-                iface
-                for iface in iftypes["bridge"]
-                if iface.addr.family == socket.AF_INET
-            ),
-            None,
-        )
-        if iface:
-            initial_output = (
-                "Assuming proxy will be accessed over hotspot (%s) at %s\n"
-                % (iface.name, iface.addr.address)
+        ipv4_output = ""
+        ipv6_output = ""
+
+        interfaces = ifaddrs.get_interfaces()
+        iftypes = defaultdict(list)
+
+        for iface in interfaces:
+            if not iface.addr:
+                continue
+            if iface.name.startswith("lo"):
+                continue
+            # XXX implement better classification of interfaces
+            if iface.name.startswith("en"):
+                iftypes["en"].append(iface)
+            elif iface.name.startswith("bridge"):
+                iftypes["bridge"].append(iface)
+            elif iface.name.startswith("utun"):
+                iftypes["vpn"].append(iface)
+            else:
+                iftypes["cell"].append(iface)
+
+        if iftypes["vpn"] and USE_PHONE_VPN:
+            ipv4_output += "VPN use enabled (change with USE_PHONE_VPN)\n"
+            new_ifaces = []
+            new_ifaces.extend(iftypes["vpn"])
+            new_ifaces.extend(iftypes["cell"])
+            iftypes["cell"] = new_ifaces
+
+        if iftypes["bridge"]:
+            iface = next(
+                (
+                    iface
+                    for iface in iftypes["bridge"]
+                    if iface.addr.family == socket.AF_INET
+                ),
+                None,
             )
-            PROXY_HOST = iface.addr.address
-    elif iftypes["en"]:
-        iface = next(
-            (iface for iface in iftypes["en"] if iface.addr.family == socket.AF_INET),
-            None,
-        )
-        if iface:
-            initial_output += (
-                "Assuming proxy will be accessed over WiFi (%s) at %s\n"
-                % (iface.name, iface.addr.address)
-            )
-            PROXY_HOST = iface.addr.address
-    else:
-        initial_output += (
-            "Warning: could not get WiFi address; assuming %s\n" % PROXY_HOST
-        )
-
-    if iftypes["cell"]:
-        iface_ipv4 = next(
-            (iface for iface in iftypes["cell"] if iface.addr.family == socket.AF_INET),
-            None,
-        )
-        iface_ipv6 = None
-
-        is_vpn = iface_ipv4 and iface_ipv4.name.startswith("utun")
-
-        if iface_ipv4:
-            iface_ipv4.addr.address
-            ipv4_output += "Will connect to IPv4 servers over interface %s at %s\n" % (
-                iface_ipv4.name,
-                iface_ipv4.addr.address,
-            )
-            CONNECT_HOST_IPV4 = iface_ipv4.addr.address
-
-            # Create a list of all IPv6 addresse that are globally routable and match the IPv4 interface
-            iface_ipv6_list = [
-                iface
-                for iface in iftypes["cell"]
-                if iface.addr.family == socket.AF_INET6
-                and iface.addr.address
-                and (is_globally_routable(iface.addr.address) if not is_vpn else True)
-                and iface.name == iface_ipv4.name
-            ]
-
-            # Select the last IPv6 address to select the temporary address for reduced tracking
-            iface_ipv6 = iface_ipv6_list[-1] if iface_ipv6_list else None
-
-        if iface_ipv6 is None and not is_vpn:
-            # Create a list of all IPv6 addresses that are globally routable
-            iface_ipv6_list = [
-                iface
-                for iface in iftypes["cell"]
-                if iface.addr.family == socket.AF_INET6
-                and iface.addr.address
-                and is_globally_routable(iface.addr.address)
-            ]
-
-            # Select the last IPv6 address to select the temporary address for reduced tracking
-            iface_ipv6 = iface_ipv6_list[-1] if iface_ipv6_list else None
-
-        if iface_ipv6:
-            iface_ipv6.addr.address
-            ipv6_output += "Will connect to IPv6 servers over interface %s at %s\n" % (
-                iface_ipv6.name,
-                iface_ipv6.addr.address,
-            )
-            # Test IPv6 connectivity
-            try:
-                test_socket = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
-                test_socket.settimeout(5)
-                test_socket.bind((iface_ipv6.addr.address, 0))
-                test_socket.connect(("2606:4700:4700::1111", 80))
-                test_socket.close()
-                CONNECT_HOST_IPV6 = iface_ipv6.addr.address
-            except Exception as e:
-                ipv6_output += (
-                    "Failed to connect to 2606:4700:4700::1111 over IPv6 due to: %s\n"
-                    % str(e)
+            if iface:
+                initial_output = (
+                    "Assuming proxy will be accessed over hotspot (%s) at %s\n"
+                    % (iface.name, iface.addr.address)
                 )
-                CONNECT_HOST_IPV6 = None
-            finally:
-                test_socket.close()
+                PROXY_HOST = iface.addr.address
+        elif iftypes["en"]:
+            iface = next(
+                (
+                    iface
+                    for iface in iftypes["en"]
+                    if iface.addr.family == socket.AF_INET
+                ),
+                None,
+            )
+            if iface:
+                initial_output += (
+                    "Assuming proxy will be accessed over WiFi (%s) at %s\n"
+                    % (iface.name, iface.addr.address)
+                )
+                PROXY_HOST = iface.addr.address
+        else:
+            initial_output += (
+                "Warning: could not get WiFi address; assuming %s\n" % PROXY_HOST
+            )
 
-    initial_output += ipv4_output + ipv6_output
-    print(initial_output)
-except Exception as e:
-    logging.error("Address detection failed: %s: %s", (type(e).__name__, e))
-    import traceback
+        if iftypes["cell"]:
+            iface_ipv4 = next(
+                (
+                    iface
+                    for iface in iftypes["cell"]
+                    if iface.addr.family == socket.AF_INET
+                ),
+                None,
+            )
+            iface_ipv6 = None
 
-    traceback.print_exc()
+            is_vpn = iface_ipv4 and iface_ipv4.name.startswith("utun")
 
-    interfaces = None
+            if iface_ipv4:
+                iface_ipv4.addr.address
+                ipv4_output += (
+                    "Will connect to IPv4 servers over interface %s at %s\n"
+                    % (
+                        iface_ipv4.name,
+                        iface_ipv4.addr.address,
+                    )
+                )
+                CONNECT_HOST_IPV4 = iface_ipv4.addr.address
+
+                # Create a list of all IPv6 addresse that are globally routable and match the IPv4 interface
+                iface_ipv6_list = [
+                    iface
+                    for iface in iftypes["cell"]
+                    if iface.addr.family == socket.AF_INET6
+                    and iface.addr.address
+                    and (
+                        is_globally_routable(iface.addr.address)
+                        if not is_vpn
+                        else True
+                    )
+                    and iface.name == iface_ipv4.name
+                ]
+
+                # Select the last IPv6 address to select the temporary address for reduced tracking
+                iface_ipv6 = iface_ipv6_list[-1] if iface_ipv6_list else None
+
+            if iface_ipv6 is None and not is_vpn:
+                # Create a list of all IPv6 addresses that are globally routable
+                iface_ipv6_list = [
+                    iface
+                    for iface in iftypes["cell"]
+                    if iface.addr.family == socket.AF_INET6
+                    and iface.addr.address
+                    and is_globally_routable(iface.addr.address)
+                ]
+
+                # Select the last IPv6 address to select the temporary address for reduced tracking
+                iface_ipv6 = iface_ipv6_list[-1] if iface_ipv6_list else None
+
+            if iface_ipv6:
+                iface_ipv6.addr.address
+                ipv6_output += (
+                    "Will connect to IPv6 servers over interface %s at %s\n"
+                    % (
+                        iface_ipv6.name,
+                        iface_ipv6.addr.address,
+                    )
+                )
+                # Test IPv6 connectivity
+                try:
+                    test_socket = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+                    test_socket.settimeout(5)
+                    test_socket.bind((iface_ipv6.addr.address, 0))
+                    test_socket.connect(("2606:4700:4700::1111", 80))
+                    test_socket.close()
+                    CONNECT_HOST_IPV6 = iface_ipv6.addr.address
+                except Exception as e:
+                    ipv6_output += (
+                        "Failed to connect to 2606:4700:4700::1111 over IPv6 due to: %s\n"
+                        % str(e)
+                    )
+                    CONNECT_HOST_IPV6 = None
+                finally:
+                    test_socket.close()
+
+        initial_output += ipv4_output + ipv6_output
+        print(initial_output)
+    except Exception as e:
+        logging.error("Address detection failed: %s: %s", (type(e).__name__, e))
+        import traceback
+
+        traceback.print_exc()
+
+        interfaces = None
+else:
+    # Android mode: detect hotspot IP and optionally advertise mDNS
+    hotspot_ip = None
+    try:
+        import psutil
+
+        preferred_names = ("ap", "wlan", "softap", "p2p")
+        candidates = []
+        for name, addrs in psutil.net_if_addrs().items():
+            for a in addrs:
+                if a.family == socket.AF_INET and a.address:
+                    try:
+                        ip_obj = ipaddress.ip_address(a.address)
+                    except Exception:
+                        continue
+                    if ip_obj.is_private:
+                        score = 0
+                        lname = name.lower()
+                        if any(p in lname for p in preferred_names):
+                            score += 10
+                        if a.address.split(".")[-1] == "1":
+                            score += 5
+                        candidates.append((score, name, a.address))
+        if candidates:
+            candidates.sort(reverse=True)
+            hotspot_ip = candidates[0][2]
+    except ImportError:
+        hotspot_ip = None
+
+    if hotspot_ip is None and args.host_ip:
+        hotspot_ip = args.host_ip
+    if hotspot_ip is None:
+        raise SystemExit(
+            "Unable to detect hotspot IP; install psutil or pass --host-ip"
+        )
+
+    # Decide how to advertise the proxy to clients
+    if args.advertise == "mdns":
+        try:
+            from zeroconf import Zeroconf, ServiceInfo
+
+            hostname = f"{args.mdns_name}.local."
+            addresses = [socket.inet_aton(hotspot_ip)]
+            mdns = Zeroconf()
+            socks_info = ServiceInfo(
+                "_socks._tcp.local.",
+                f"{args.mdns_name}._socks._tcp.local.",
+                addresses=addresses,
+                port=SOCKS_PORT,
+                properties={},
+                server=hostname,
+            )
+            http_info = ServiceInfo(
+                "_http._tcp.local.",
+                f"{args.mdns_name}._http._tcp.local.",
+                addresses=addresses,
+                port=HTTP_PORT,
+                properties={},
+                server=hostname,
+            )
+            mdns.register_service(socks_info)
+            mdns.register_service(http_info)
+            PROXY_HOST = args.mdns_name + ".local"
+            initial_output += (
+                f"mDNS: advertising {PROXY_HOST} for SOCKS:{SOCKS_PORT} HTTP:{HTTP_PORT}\n"
+            )
+        except ImportError:
+            initial_output += (
+                "zeroconf not installed; falling back to IP mode\n"
+            )
+            PROXY_HOST = hotspot_ip
+    else:
+        PROXY_HOST = hotspot_ip
 
 
 def create_wpad_server(hhost, hport, phost, pport):
@@ -320,4 +441,11 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("Shutting down.")
+    finally:
+        try:
+            if mdns is not None:
+                mdns.unregister_all_services()
+                mdns.close()
+        except Exception:
+            pass
         wpad_server.shutdown()

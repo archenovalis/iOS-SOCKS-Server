@@ -1,6 +1,7 @@
 # What
 
-A simple HTTP/SOCKS proxy designed to run on Pythonista on iOS, letting you fake-tether your devices to a phone. 
+A simple HTTP/SOCKS proxy designed to run on Pythonista on iOS, letting you fake-tether your devices to a phone.
+It can also run on Android (Termux) with automatic hotspot IP detection and optional mDNS advertising.
 
 # Installation
 
@@ -11,7 +12,7 @@ A simple HTTP/SOCKS proxy designed to run on Pythonista on iOS, letting you fake
 - Open Pythonista, navigate to iCloud, `iOS-SOCKS-Server` and open the `socks5.py` script.
 - Optionally, you can tap on the wrench and select `Shortcuts...` to add the script to your home screen. 
 
-# Running
+# Running (iOS)
 
 - Connect your devices to the same WiFi network as your phone. If there's no suitable network, you can create a computer-to-computer (ad-hoc) network using your laptop and connect to it with your phone.
 - Open the home screen shortcut (if you made one), or open the `socks5.py` script in Pythonista and hit Run. 
@@ -22,8 +23,42 @@ A simple HTTP/SOCKS proxy designed to run on Pythonista on iOS, letting you fake
         - Make sure you set proxy settings in any other application that is not using the system proxy settings.
     - For Windows or Linux, please follow the appropriate instructions for configuring a proxy on your system. It is recommended that you use the PAC URL if possible (also called a setup script or automatic configuration script).
         - On Windows, you may consider using the [SSTap](https://sourceforge.net/projects/sstap/) project to force all connections to go through the proxy. Disclaimer: this project does not have any affiliation with SSTap and cannot provide support for any issues that arise from its use.
-    - For Android: open Settings, Wi-Fi, select your network, expand the Advanced Settings, change the proxy setting to Manual, and enter the host and port for the *HTTP proxy*. Note that SOCKS proxy support on Android is limited, even when using the PAC URL, so the HTTP proxy is recommended.
-        - Many applications on Android do not respect proxy settings, unfortunately, and in those cases you will have to configure the apps manually or use an app like Proxifier to force apps to use the proxy.
+    - For Android (legacy note): previously Android support was limited. See the Android section below for the new mode.
+
+# Running (Android via Termux)
+
+## Install dependencies
+
+```bash
+pkg install python
+pip install psutil zeroconf
+```
+
+## Start the server (Android mode)
+
+- mDNS advertising (default): clients can use `proxy.local` instead of changing IPs.
+
+```bash
+python3 socks5.py --mode android --mdns-name proxy
+```
+
+- Raw IP advertising (no mDNS):
+
+```bash
+python3 socks5.py --mode android --advertise ip
+# or fix it explicitly if autodetect fails or you want a chosen IP
+python3 socks5.py --mode android --advertise ip --host-ip 192.168.43.1
+```
+
+## Client configuration
+
+- SOCKS5: set host to `proxy.local` and port `9876` (or the IP if using `--advertise ip`).
+- HTTP proxy: set host to `proxy.local` and port `9877`.
+- PAC URL is printed at startup and uses the advertised hostname.
+
+Notes:
+- mDNS works only on the local hotspot network and requires the client OS to support `.local` resolution (macOS/iOS native; Linux via Avahi; Windows with Bonjour).
+- If mDNS isn’t desired or supported, use `--advertise ip` and point clients at the printed IP.
 
 # Why
 
