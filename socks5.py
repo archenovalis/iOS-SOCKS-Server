@@ -308,6 +308,8 @@ else:
         )
 
     # Decide how to advertise the proxy to clients
+    # track an alternate endpoint to include in PAC for resilience
+    alt_host_for_pac = None
     if args.advertise == "mdns":
         try:
             from zeroconf import Zeroconf, ServiceInfo
@@ -334,6 +336,7 @@ else:
             mdns.register_service(socks_info)
             mdns.register_service(http_info)
             PROXY_HOST = args.mdns_name + ".local"
+            alt_host_for_pac = hotspot_ip
             initial_output += (
                 f"mDNS: advertising {PROXY_HOST} for SOCKS:{SOCKS_PORT} HTTP:{HTTP_PORT}\n"
             )
@@ -343,10 +346,28 @@ else:
             )
             PROXY_HOST = hotspot_ip
     else:
-        PROXY_HOST = hotspot_ip
+        # if custom IP provided, validate it's present locally to avoid misleading clients
+        if args.host_ip:
+            try:
+                import psutil
+                have = False
+                for addrs in psutil.net_if_addrs().values():
+                    for a in addrs:
+                        if a.family == socket.AF_INET and a.address == args.host_ip:
+                            have = True
+                            break
+                    if have:
+                        break
+                if not have:
+                    initial_output += (
+                        f"Warning: --host-ip {args.host_ip} is not assigned to this device; clients may not reach it\n"
+                    )
+            except Exception:
+                pass
+        PROXY_HOST = hotspot_ip if not args.host_ip else args.host_ip
 
 
-def create_wpad_server(hhost, hport, phost, pport):
+def create_wpad_server(hhost, hport, phost, pport, alt_phost=None):
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
     class HTTPHandler(BaseHTTPRequestHandler):
@@ -359,6 +380,10 @@ def create_wpad_server(hhost, hport, phost, pport):
             s.send_response(200)
             s.send_header("Content-type", "application/x-ns-proxy-autoconfig")
             s.end_headers()
+            primary = "%s:%d" % (phost, pport)
+            secondary = None
+            if alt_phost and alt_phost != phost:
+                secondary = "%s:%d" % (alt_phost, pport)
             s.wfile.write(
                 (
                     """
@@ -371,11 +396,19 @@ function FindProxyForURL(url, host)
    } else if (isInNet(host, "10.0.0.0", "255.0.0.0")) {
       return "DIRECT";
    } else {
-      return "SOCKS5 %s:%d; SOCKS %s:%d";
+      return %s;
    }
 }
 """
-                    % (phost, pport, phost, pport)
+                    % (
+                        (
+                            ('"SOCKS5 ' + primary + '; SOCKS ' + primary + '"')
+                            if not secondary
+                            else (
+                                '"SOCKS5 ' + primary + '; SOCKS5 ' + secondary + '; SOCKS ' + secondary + '"'
+                            )
+                        )
+                    )
                 )
                 .lstrip()
                 .encode()
@@ -396,9 +429,21 @@ def run_wpad_server(server):
 if __name__ == "__main__":
     import asyncio
 
-    wpad_server = create_wpad_server(LISTEN_HOST, WPAD_PORT, PROXY_HOST, SOCKS_PORT)
+    # Include alternate host in PAC if available (Android mdns: hostname+IP)
+    alt_host = None
+    try:
+        alt_host = alt_host_for_pac
+    except NameError:
+        alt_host = None
+    wpad_server = create_wpad_server(
+        LISTEN_HOST, WPAD_PORT, PROXY_HOST, SOCKS_PORT, alt_phost=alt_host
+    )
 
     initial_output += "PAC URL: http://{}:{}/wpad.dat\n".format(PROXY_HOST, WPAD_PORT)
+    if alt_host and alt_host != PROXY_HOST:
+        initial_output += "PAC URL (alt): http://{}:{}/wpad.dat\n".format(
+            alt_host, WPAD_PORT
+        )
     initial_output += "SOCKS Address: {}:{}\n".format(
         PROXY_HOST or LISTEN_HOST, SOCKS_PORT
     )
