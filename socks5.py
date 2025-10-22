@@ -80,32 +80,12 @@ except ImportError:
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--mode", choices=["ios", "android"], default="ios")
-parser.add_argument(
-    "--advertise",
-    choices=["mdns", "ip"],
-    default="mdns",
-    help="Android only: advertise proxy via mDNS hostname or raw IP",
-)
-parser.add_argument(
-    "--host-ip",
-    help="Android only: override hotspot IP when advertise=ip or psutil is unavailable",
-)
-parser.add_argument(
-    "--mdns-name",
-    default="proxy",
-    help="Android only: mDNS base name (results in <name>.local)",
-)
 args = parser.parse_args()
 
 # shared output banner accumulator
 initial_output = ""
 
 mdns = None
-
-# Android-only flags guard when running in iOS mode
-if args.mode == "ios":
-    if args.host_ip or args.advertise != "mdns" or args.mdns_name != "proxy":
-        initial_output += "Android-only flags provided; ignoring in iOS mode\n"
 
 if args.mode == "ios":
     try:
@@ -272,7 +252,7 @@ if args.mode == "ios":
 
         interfaces = None
 else:
-    # Android mode: detect hotspot IP and optionally advertise mDNS
+    # Android mode: detect hotspot IP (no mDNS/custom IP)
     hotspot_ip = None
     try:
         import psutil
@@ -300,71 +280,11 @@ else:
     except ImportError:
         hotspot_ip = None
 
-    if hotspot_ip is None and args.host_ip:
-        hotspot_ip = args.host_ip
     if hotspot_ip is None:
         raise SystemExit(
-            "Unable to detect hotspot IP; install psutil or pass --host-ip"
+            "Unable to detect hotspot IP; install psutil"
         )
-
-    # Decide how to advertise the proxy to clients
-    # track an alternate endpoint to include in PAC for resilience
-    alt_host_for_pac = None
-    if args.advertise == "mdns":
-        try:
-            from zeroconf import Zeroconf, ServiceInfo
-
-            hostname = f"{args.mdns_name}.local."
-            addresses = [socket.inet_aton(hotspot_ip)]
-            mdns = Zeroconf()
-            socks_info = ServiceInfo(
-                "_socks._tcp.local.",
-                f"{args.mdns_name}._socks._tcp.local.",
-                addresses=addresses,
-                port=SOCKS_PORT,
-                properties={},
-                server=hostname,
-            )
-            http_info = ServiceInfo(
-                "_http._tcp.local.",
-                f"{args.mdns_name}._http._tcp.local.",
-                addresses=addresses,
-                port=HTTP_PORT,
-                properties={},
-                server=hostname,
-            )
-            mdns.register_service(socks_info)
-            mdns.register_service(http_info)
-            PROXY_HOST = args.mdns_name + ".local"
-            alt_host_for_pac = hotspot_ip
-            initial_output += (
-                f"mDNS: advertising {PROXY_HOST} for SOCKS:{SOCKS_PORT} HTTP:{HTTP_PORT}\n"
-            )
-        except ImportError:
-            initial_output += (
-                "zeroconf not installed; falling back to IP mode\n"
-            )
-            PROXY_HOST = hotspot_ip
-    else:
-        # if custom IP provided, validate it's present locally to avoid misleading clients
-        if args.host_ip:
-            try:
-                import psutil
-                have = False
-                for addrs in psutil.net_if_addrs().values():
-                    for a in addrs:
-                        if a.family == socket.AF_INET and a.address == args.host_ip:
-                            have = True
-                            break
-                    if have:
-                        break
-                if not have:
-                    initial_output += (
-                        f"Warning: --host-ip {args.host_ip} is not assigned to this device; clients may not reach it\n"
-                    )
-            except Exception:
-                pass
-        PROXY_HOST = hotspot_ip if not args.host_ip else args.host_ip
+    PROXY_HOST = hotspot_ip
 
 
 def create_wpad_server(hhost, hport, phost, pport, alt_phost=None):
@@ -429,21 +349,11 @@ def run_wpad_server(server):
 if __name__ == "__main__":
     import asyncio
 
-    # Include alternate host in PAC if available (Android mdns: hostname+IP)
-    alt_host = None
-    try:
-        alt_host = alt_host_for_pac
-    except NameError:
-        alt_host = None
     wpad_server = create_wpad_server(
-        LISTEN_HOST, WPAD_PORT, PROXY_HOST, SOCKS_PORT, alt_phost=alt_host
+        LISTEN_HOST, WPAD_PORT, PROXY_HOST, SOCKS_PORT, alt_phost=None
     )
 
     initial_output += "PAC URL: http://{}:{}/wpad.dat\n".format(PROXY_HOST, WPAD_PORT)
-    if alt_host and alt_host != PROXY_HOST:
-        initial_output += "PAC URL (alt): http://{}:{}/wpad.dat\n".format(
-            alt_host, WPAD_PORT
-        )
     initial_output += "SOCKS Address: {}:{}\n".format(
         PROXY_HOST or LISTEN_HOST, SOCKS_PORT
     )

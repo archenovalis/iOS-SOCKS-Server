@@ -1,7 +1,7 @@
 # What
 
 A simple HTTP/SOCKS proxy designed to run on Pythonista on iOS, letting you fake-tether your devices to a phone.
-It can also run on Android (Termux) with automatic hotspot IP detection and optional mDNS advertising.
+It can also run on Android (Termux) with automatic hotspot IP detection.
 
 # Installation
 
@@ -31,34 +31,20 @@ It can also run on Android (Termux) with automatic hotspot IP detection and opti
 
 ```bash
 pkg install python
-pip install psutil zeroconf
+pip install psutil
 ```
 
 ## Start the server (Android mode)
 
-- mDNS advertising (default): clients can use `proxy.local` instead of changing IPs.
-
 ```bash
-python3 socks5.py --mode android --mdns-name proxy
-```
-
-- Raw IP advertising (no mDNS):
-
-```bash
-python3 socks5.py --mode android --advertise ip
-# or fix it explicitly if autodetect fails or you want a chosen IP
-python3 socks5.py --mode android --advertise ip --host-ip 192.168.43.1
+python3 socks5.py --mode android
 ```
 
 ## Client configuration
 
-- SOCKS5: set host to `proxy.local` and port `9876` (or the IP if using `--advertise ip`).
-- HTTP proxy: set host to `proxy.local` and port `9877`.
-- PAC URL is printed at startup and uses the advertised hostname.
-
-Notes:
-- mDNS works only on the local hotspot network and requires the client OS to support `.local` resolution (macOS/iOS native; Linux via Avahi; Windows with Bonjour).
-- If mDNS isn’t desired or supported, use `--advertise ip` and point clients at the printed IP.
+- SOCKS5: set host to the printed hotspot IP and port `9876`.
+- HTTP proxy: set host to the printed hotspot IP and port `9877`.
+- PAC URL is printed at startup and uses the hotspot IP.
 
 # Why
 
