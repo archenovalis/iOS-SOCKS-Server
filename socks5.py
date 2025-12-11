@@ -6,6 +6,8 @@ import ipaddress
 import argparse
 import logging
 import socket
+import ui
+import struct
 import threading
 
 from lib.socks5_server import AsyncSocks5Handler
@@ -115,6 +117,8 @@ if args.mode == "ios":
                 iftypes["en"].append(iface)
             elif iface.name.startswith("bridge"):
                 iftypes["bridge"].append(iface)
+            elif iface.name == 'pdp_ip0':
+                iftypes["cell"].append(iface)
             elif iface.name.startswith("utun"):
                 iftypes["vpn"].append(iface)
             else:
@@ -338,6 +342,13 @@ function FindProxyForURL(url, host)
     server = HTTPServer((hhost, hport), HTTPHandler)
     return server
 
+# Handler for full screen button to render a full screen window.
+# Use a two-finger "slide down" gesture to close.
+def full_screen_handler(sender):
+    fs_view = ui.View()
+    fs_view.name = "Full screen"
+    fs_view.background_color = "black"
+    fs_view.present(style="popover", hide_title_bar=True, orientations=["landscape"])
 
 def run_wpad_server(server):
     try:
@@ -391,7 +402,20 @@ if __name__ == "__main__":
         asyncio.create_task(server.run())
 
         await stats.render_forever()
+	
+    # Create side panel UI component to enter full screen
+    view = ui.View()
+    view.name = "SOCKS"
+    view.background_color = "black"
+    view.flex = "WH"
+    # Add simple button to show full screen popover
+    fs_button = ui.Button(title="Enter full screen")
+    fs_button.action = full_screen_handler
 
+    # Render main UI and full screen button
+    view.add_subview(fs_button)
+    view.present(style="panel", hide_title_bar=True)
+	
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
